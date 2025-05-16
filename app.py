@@ -1,5 +1,3 @@
-# app.py
-
 import os
 import json
 import tempfile
@@ -12,7 +10,7 @@ from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 from openai import OpenAI
 
-# --- STREAMLIT SECRETS & CONFIG ---
+# --- CONFIGURATION via st.secrets ---
 OPENAI_KEY    = st.secrets["openai"]["api_key"]
 SERPAPI_KEY   = st.secrets["serpapi"]["api_key"]
 PINECONE_KEY  = st.secrets["pinecone"]["api_key"]
@@ -20,13 +18,14 @@ PINECONE_ENV  = st.secrets["pinecone"]["environment"]
 GCP_JSON      = st.secrets["gcp"]["service_account"]
 SHARED_FOLDER = st.secrets["drive"]["folder_id"]
 
-# Initialize OpenAI client
+# Initialize OpenAI
 client = OpenAI(api_key=OPENAI_KEY)
 
-# Drive API setup
-gcp_info    = json.loads(GCP_JSON)
+# Google Drive API setup
+gcp_info = json.loads(GCP_JSON)
 credentials = service_account.Credentials.from_service_account_info(
-    gcp_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+    gcp_info,
+    scopes=["https://www.googleapis.com/auth/drive.readonly"]
 )
 drive_service = build("drive", "v3", credentials=credentials)
 
@@ -43,8 +42,7 @@ if INDEX_NAME not in pc.list_indexes().names():
     )
 index = pc.Index(INDEX_NAME)
 
-# --- HELPERS ---
-
+# Helpers
 def get_embedding(text: str) -> list:
     resp = client.embeddings.create(model="text-embedding-ada-002", input=text)
     return resp.data[0].embedding
@@ -53,22 +51,20 @@ def extract_text_from_drive_file(file_id: str, mime: str) -> str:
     if mime == "application/pdf":
         r = requests.get(
             f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media",
-            headers={"Authorization": f"Bearer {credentials.token}"},
-            stream=True
+            headers={"Authorization": f"Bearer {credentials.token}"}
         )
         with tempfile.NamedTemporaryFile(delete=False) as fh:
             fh.write(r.content)
             path = fh.name
         return "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
     else:
-        data = drive_service.files().export(
-            fileId=file_id, mimeType="text/plain"
-        ).execute()
+        data = drive_service.files().export(fileId=file_id, mimeType="text/plain").execute()
         return data.decode("utf-8")
 
+# Index Drive folder
 def index_drive_docs():
     st.write("🚀 **Starting Drive folder indexing...**")
-    total_upserts = 0
+    total = 0
     token = None
     while True:
         resp = drive_service.files().list(
@@ -78,77 +74,68 @@ def index_drive_docs():
                 "mimeType contains 'document' or "
                 "mimeType contains 'presentation')"
             ),
-            fields="nextPageToken, files(id, name, mimeType)",
-            pageToken=token
+            fields="nextPageToken, files(id,name,mimeType)",
+            pageToken=token,
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+            corpora="allDrives"
         ).execute()
 
         files = resp.get("files", [])
-        st.write(f"🔍 Found **{len(files)}** files in the shared folder:")
+        st.write(f"🔍 Found **{len(files)}** files:")
         for f in files:
-            st.write(f" • **{f['name']}**  (`{f['mimeType']}`)")
+            st.write(f" • **{f['name']}** (`{f['mimeType']}`)")
             txt = extract_text_from_drive_file(f["id"], f["mimeType"])
             if not txt:
-                st.write(f"   ⚠️ No text extracted for **{f['name']}**")
+                st.write(f"   ⚠️ No text extracted for {f['name']}")
                 continue
             emb = get_embedding(txt)
             index.upsert(vectors=[(f["id"], emb, {"name": f["name"], "source": "drive"})])
-            st.write(f"   ✅ Upserted vector for **{f['name']}**")
-            total_upserts += 1
+            st.write(f"   ✅ Upserted vector for {f['name']}")
+            total += 1
 
         token = resp.get("nextPageToken")
         if not token:
             break
 
-    st.write(f"✅ **Indexing complete!** Total upserts in this run: **{total_upserts}**")
+    st.write(f"✅ **Indexing complete!** Upserted **{total}** vectors.")
     stats = index.describe_index_stats()
-    st.write(f"📦 Pinecone has **{stats.get('total_vector_count', 0)}** total vectors stored.")
+    st.write(f"📦 Pinecone now has {stats.get('total_vector_count',0)} vectors.")
 
-def fetch_and_index_web(query: str, top_k: int = 3):
-    st.write(f"🌐 **Fetching & indexing top {top_k} web results for** `{query}`")
+# Fetch & index web
+def fetch_and_index_web(query: str, top_k: int =3):
+    st.write(f"🌐 Fetching & indexing top {top_k} web results for '{query}'")
     r = requests.get(
         "https://serpapi.com/search.json",
-        params={"q": query, "api_key": SERPAPI_KEY}
+        params={"q":query, "api_key":SERPAPI_KEY}
     )
     data = r.json()
-    results = data.get("organic_results", [])[:top_k]
-    for r in results:
+    for r in data.get("organic_results", [])[:top_k]:
         url = r.get("link")
-        if not url:
-            continue
+        if not url: continue
         html = requests.get(url, timeout=10).text
-        text = " ".join(
-            p.get_text() for p in BeautifulSoup(html, "html.parser").find_all("p")
-        )
-        if not text:
-            continue
+        text = " ".join(p.get_text() for p in BeautifulSoup(html,"html.parser").find_all("p"))
+        if not text: continue
         emb = get_embedding(text)
-        meta = {"name": r.get("title", url), "source": url}
-        index.upsert(vectors=[(url, emb, meta)])
-        st.write(f"   🔹 Indexed web page: **{r.get('title',url)}**")
+        index.upsert(vectors=[(url, emb, {"name":r.get("title",url),"source":url})])
+        st.write(f"   🔹 Indexed web page: {r.get('title',url)}")
     st.write("✅ **Web indexing complete!**")
 
-def get_relevant_docs(query: str, top_k: int = 5) -> list[str]:
+# Query & chat
+def get_relevant_docs(query: str, top_k:int=5)->list[str]:
     emb = get_embedding(query)
     res = index.query(vector=emb, top_k=top_k, include_metadata=True)
-    return [
-        f"{m['metadata']['source']}: {m['metadata'].get('name','')}"
-        for m in res["matches"]
-    ]
+    return [f"{m['metadata']['source']}: {m['metadata'].get('name','')}" for m in res["matches"]]
 
-def chat_with_context(query: str) -> str:
+def chat_with_context(query: str)->str:
     docs = get_relevant_docs(query)
-    context = "\n\n---\n\n".join(docs)
-    messages = [
-        {"role": "system", "content": "You are a Zero1 strategy assistant."},
-        {"role": "user",   "content": f"{query}\n\nContext:\n{context}"}
-    ]
-    resp = client.chat.completions.create(
-        model="gpt-4", messages=messages, temperature=0.7
-    )
+    ctx = "\n\n---\n\n".join(docs)
+    msgs = [{"role":"system","content":"You are a Zero1 strategy assistant."},
+            {"role":"user","content":f"{query}\n\nContext:\n{ctx}"}]
+    resp = client.chat.completions.create(model="gpt-4", messages=msgs, temperature=0.7)
     return resp.choices[0].message.content
 
 # --- STREAMLIT UI ---
-
 st.set_page_config(page_title="Zero1 RAG Assistant", layout="wide")
 st.title("🔮 Zero1 RAG Assistant")
 
@@ -171,5 +158,4 @@ if st.button("Analyze") and user_q:
 
 st.write("---")
 st.subheader("📊 Cost & Growth Analysis")
-st.info("Use pandas on the assistant’s outputs to model capex & 100× growth.")
-
+st.info("Use pandas on the assistant’s outputs to model capex & growth.")

@@ -97,9 +97,7 @@ def index_drive_docs():
                 st.write(f"   ↪️ Already indexed **{name}**; skipping.")
                 continue
             st.write(f" • **{name}** (`{mime}`)")
-            name, mime = f['name'], f['mimeType']
-            st.write(f" • **{name}** (`{mime}`)")
-            txt = extract_text_from_drive_file(f['id'], mime)
+            txt = extract_text_from_drive_file(file_id, mime)
             if not txt:
                 st.write(f"   ⚠️ No text extracted for {name}")
                 continue
@@ -114,7 +112,6 @@ def index_drive_docs():
     st.write(f"✅ **Drive indexing complete!** Total upserts: **{total}**")
     stats = index.describe_index_stats()
     st.write(f"📦 Pinecone now has **{stats.get('total_vector_count',0)}** vectors.")
-    return total
 
 
 def fetch_and_index_web(query: str, top_k: int = 3) -> int:
@@ -154,18 +151,13 @@ def chat_with_context(query: str, include_web: bool, web_prompt: str) -> str:
     if include_web and web_prompt:
         fetch_and_index_web(web_prompt)
     docs = get_relevant_docs(query)
+    # Build context with explicit labels
     context_sections = [f"[Drive] {d}" for d in docs]
     if include_web and web_prompt:
-        context_sections += [f"[Web] {web_prompt}"]
-    context = "
-
----
-
-".join(context_sections)
-    prompt = query + "
-
-Context:
-" + context
+        context_sections.append(f"[Web] {web_prompt}")
+    # Properly join context sections
+    context = "\n\n---\n\n".join(context_sections)
+    prompt = f"{query}\n\nContext:\n{context}"
     resp = client.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],

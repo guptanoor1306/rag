@@ -24,13 +24,19 @@ SHARED_FOLDER = st.secrets["drive"]["folder_id"]
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_KEY)
 
+# Debug GCP project and service account
+try:
+    gcp_info = json.loads(GCP_JSON)
+    st.write("⚙️ Using GCP project:", gcp_info.get("project_id"))
+    st.write("⚙️ Service account:", gcp_info.get("client_email"))
+except Exception as e:
+    st.error(f"Error parsing GCP credentials: {e}")
+
 # Setup Google Drive API
-gcp_info    = json.loads(GCP_JSON)
-creds       = service_account.Credentials.from_service_account_info(
-    gcp_info,
-    scopes=["https://www.googleapis.com/auth/drive.readonly"]
+credentials = service_account.Credentials.from_service_account_info(
+    gcp_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
 )
-drive_service = build("drive", "v3", credentials=creds)
+drive_service = build("drive", "v3", credentials=credentials)
 
 # Initialize Pinecone
 pc = Pinecone(api_key=PINECONE_KEY, environment=PINECONE_ENV)
@@ -56,7 +62,7 @@ def extract_text_from_drive_file(file_id: str, mime: str) -> str:
     if mime == "application/pdf":
         r = requests.get(
             f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media",
-            headers={"Authorization": f"Bearer {creds.token}"},
+            headers={"Authorization": f"Bearer {credentials.token}"},
             stream=True
         )
         with tempfile.NamedTemporaryFile(delete=False) as fh:
@@ -64,17 +70,21 @@ def extract_text_from_drive_file(file_id: str, mime: str) -> str:
             path = fh.name
         return "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
     else:
-        return drive_service.files().export(fileId=file_id, mimeType="text/plain").execute().decode("utf-8")
+        # Google Docs or Slides
+        data = drive_service.files().export(fileId=file_id, mimeType="text/plain").execute()
+        return data.decode("utf-8")
 
 
 def index_drive_docs():
-    """Indexes all Docs, Slides, and PDFs in the shared folder."""
+    st.write("🚀 **Starting Drive folder indexing...**")
+    total = 0
+    token = None
+    # Only Docs, Slides, PDFs
     mime_filter = (
         "mimeType='application/pdf' or "
         "mimeType='application/vnd.google-apps.document' or "
         "mimeType='application/vnd.google-apps.presentation'"
     )
-    token, total = None, 0
     while True:
         resp = drive_service.files().list(
             q=f"'{SHARED_FOLDER}' in parents and ({mime_filter})",
@@ -83,71 +93,112 @@ def index_drive_docs():
             includeItemsFromAllDrives=True,
             supportsAllDrives=True
         ).execute()
-        for f in resp.get("files", []):
-            text = extract_text_from_drive_file(f["id"], f["mimeType"])
-            if text:
-                emb = get_embedding(text)
-                index.upsert(vectors=[(f["id"], emb, {"name": f["name"], "source": "drive"})])
+
+        files = resp.get("files", [])
+        st.write(f"🔍 Found **{len(files)}** Docs/Slides/PDFs in folder {SHARED_FOLDER}:")
+        for f in files:
+            name, mime = f['name'], f['mimeType']
+            st.write(f" • **{name}** (`{mime}`)")
+            txt = extract_text_from_drive_file(f['id'], mime)
+            if not txt:
+                st.write(f"   ⚠️ No text extracted for {name}")
+            else:
+                emb = get_embedding(txt)
+                index.upsert(vectors=[(f['id'], emb, {"name": name, "source": "drive"})])
+                st.write(f"   ✅ Upserted vector for {name}")
                 total += 1
+
         token = resp.get("nextPageToken")
         if not token:
             break
-    return total
+
+    st.write(f"✅ **Indexing complete!** Upserted **{total}** vectors.")
+    stats = index.describe_index_stats()
+    st.write(f"📦 Pinecone now has **{stats.get('total_vector_count',0)}** vectors.")
 
 
-def fetch_and_index_web(query: str, top_k: int = 3) -> int:
-    """Fetches top web results via SerpAPI and indexes them."""
+def fetch_and_index_web(query: str, top_k: int = 3):
+    st.write(f"🌐 **Fetching & indexing top {top_k} web results for** `{query}`")
     r = requests.get(
         "https://serpapi.com/search.json",
         params={"q": query, "api_key": SERPAPI_KEY}
     )
-    total = 0
-    for res in r.json().get("organic_results", [])[:top_k]:
+    data = r.json()
+    for res in data.get("organic_results", [])[:top_k]:
         url = res.get("link")
         if not url:
             continue
         html = requests.get(url, timeout=10).text
-        text = " ".join(p.get_text() for p in BeautifulSoup(html, "html.parser").find_all("p"))
-        if text:
-            emb = get_embedding(text)
-            index.upsert(vectors=[(url, emb, {"name": res.get("title", url), "source": url})])
-            total += 1
-    return total
+        text = " ".join(
+            p.get_text() for p in BeautifulSoup(html, "html.parser").find_all("p")
+        )
+        if not text:
+            continue
+        emb = get_embedding(text)
+        meta = {"name": res.get("title", url), "source": url}
+        index.upsert(vectors=[(url, emb, meta)])
+        st.write(f"   🔹 Indexed web page: **{res.get('title',url)}**")
+    st.write("✅ **Web indexing complete!**")
 
 
 def get_relevant_docs(query: str, top_k: int = 5) -> list[str]:
     emb = get_embedding(query)
     res = index.query(vector=emb, top_k=top_k, include_metadata=True)
-    return [f"{m['metadata']['source']}: {m['metadata'].get('name','')}" for m in res["matches"]]
+    return [
+        f"{m['metadata']['source']}: {m['metadata'].get('name','')}"
+        for m in res["matches"]
+    ]
 
 
 def chat_with_context(query: str) -> str:
     docs = get_relevant_docs(query)
-    prompt = query + "\n\nContext:" + "\n".join(docs)
-    resp = client.chat.completions.create(model="gpt-4", messages=[
-        {"role": "user", "content": prompt}
-    ], temperature=0.7)
+    ctx = "\n\n---\n\n".join(docs)
+    msgs = [
+        {"role": "system", "content": "You are a Zero1 strategy assistant."},
+        {"role": "user",   "content": f"{query}\n\nContext:\n{ctx}"}
+    ]
+    resp = client.chat.completions.create(model="gpt-4", messages=msgs, temperature=0.7)
     return resp.choices[0].message.content
 
 # --- UI ---
 st.title("🔮 Zero1 RAG Assistant")
-query = st.text_input("Enter your strategic query:")
-include_web = st.checkbox("Include web context in this query")
-if st.button("Analyze") and query:
-    with st.spinner("Indexing Drive documents..."):
-        drive_count = index_drive_docs()
-    if drive_count:
-        st.success(f"Indexed {drive_count} Drive files.")
-    else:
-        st.info("No Drive files found or indexed.")
-    if include_web:
-        with st.spinner("Fetching and indexing web context..."):
-            web_count = fetch_and_index_web(query)
-        if web_count:
-            st.success(f"Indexed {web_count} web pages.")
-        else:
-            st.info("No web pages indexed.")
-    with st.spinner("Generating response..."):
-        answer = chat_with_context(query)
+
+with st.sidebar:
+    st.header("Actions")
+    if st.button("Index Drive Folder"):
+        index_drive_docs()
+    st.write("---")
+    st.caption("🔍 Use this to pull additional web context, if desired.")
+    web_q = st.text_input("Fetch & index web:")
+    if st.button("Fetch Web") and web_q:
+        fetch_and_index_web(web_q)
+
+st.write("---")
+user_q = st.text_input("Ask your strategic question:")
+if st.button("Analyze") and user_q:
+    with st.spinner("🤖 Thinking..."):
+        ans = chat_with_context(user_q)
     st.markdown("**Response:**")
-    st.write(answer)
+    st.write(ans)
+
+st.write("---")
+
+# 📊 Cost & Growth Analysis Section
+st.subheader("📊 Cost & Growth Analysis")
+# Input for initial capex
+initial_capex = st.number_input(
+    "Enter current annual CapEx (in crores):", min_value=0.0, step=1.0, format="%.2f"
+)
+# Input for growth multiple
+growth_factor = st.number_input(
+    "Enter desired growth multiple (e.g., 100 for 100× growth):", min_value=1.0, step=1.0, format="%.1f"
+)
+if st.button("Compute Cost Model"):
+    if initial_capex <= 0:
+        st.error("Please enter a valid initial CapEx greater than 0.")
+    else:
+        target_capex = initial_capex  # assuming capex remains same as OPEX? adjust logic as needed
+        growth_capex = initial_capex * growth_factor
+        st.write(f"- **Initial CapEx:** {initial_capex} crores")
+        st.write(f"- **Target CapEx for {growth_factor}× growth:** {growth_capex:.2f} crores")
+        st.success("Cost model computed! Adjust parameters as needed.")

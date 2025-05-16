@@ -45,9 +45,9 @@ if INDEX_NAME not in pc.list_indexes().names():
     )
 index = pc.Index(INDEX_NAME)
 
-# Track already indexed files to avoid duplicates
-if 'indexed_files' not in st.session_state:
-    st.session_state['indexed_files'] = set()
+# Track already indexed file chunks to avoid duplicates
+if 'indexed_chunks' not in st.session_state:
+    st.session_state['indexed_chunks'] = set()
 
 # --- Helper Functions ---
 
@@ -71,15 +71,16 @@ def extract_text_from_drive_file(file_id: str, mime: str) -> str:
         return drive_service.files().export(fileId=file_id, mimeType="text/plain").execute().decode("utf-8")
 
 
-def index_drive_docs():
-    """Real-time indexing logs and upserts for Drive files."""
+def index_drive_docs(chunk_size: int = 3000):
+    """Indexes Docs/Slides/PDFs by splitting large texts into manageable chunks."""
     mime_filter = (
         "mimeType='application/pdf' or "
         "mimeType='application/vnd.google-apps.document' or "
         "mimeType='application/vnd.google-apps.presentation'"
     )
-    token, total = None, 0
-    st.write("🚀 **Starting Drive folder indexing...**")
+    total_chunks = 0
+    st.write("🚀 **Starting Drive folder indexing with chunking...**")
+    token = None
     while True:
         resp = drive_service.files().list(
             q=f"'{SHARED_FOLDER}' in parents and ({mime_filter})",
@@ -89,29 +90,32 @@ def index_drive_docs():
             supportsAllDrives=True
         ).execute()
         files = resp.get("files", [])
-        st.write(f"🔍 Found **{len(files)}** files in folder {SHARED_FOLDER}:")
+        st.write(f"🔍 Found **{len(files)}** files to index.")
         for f in files:
             file_id = f['id']
             name, mime = f['name'], f['mimeType']
-            if file_id in st.session_state['indexed_files']:
-                st.write(f"   ↪️ Already indexed **{name}**; skipping.")
+            st.write(f" • Processing **{name}** ({mime})")
+            text = extract_text_from_drive_file(file_id, mime)
+            if not text:
+                st.write(f"   ⚠️ No extractable text for {name}.")
                 continue
-            st.write(f" • **{name}** (`{mime}`)")
-            txt = extract_text_from_drive_file(file_id, mime)
-            if not txt:
-                st.write(f"   ⚠️ No text extracted for {name}")
-                continue
-            emb = get_embedding(txt)
-            index.upsert(vectors=[(file_id, emb, {"name": name, "source": "drive"})])
-            st.session_state['indexed_files'].add(file_id)
-            st.write(f"   ✅ Upserted vector for {name}")
-            total += 1
+            # Split into chunks to respect token limit
+            for i in range(0, len(text), chunk_size):
+                chunk = text[i:i+chunk_size]
+                chunk_id = f"{file_id}_chunk_{i//chunk_size}"
+                if chunk_id in st.session_state['indexed_chunks']:
+                    continue
+                emb = get_embedding(chunk)
+                index.upsert(vectors=[(chunk_id, emb, {"name": name, "chunk_index": i//chunk_size, "source": "drive"})])
+                st.session_state['indexed_chunks'].add(chunk_id)
+                total_chunks += 1
+            st.write(f"   ✅ Indexed {((len(text)-1)//chunk_size)+1} chunks for {name}")
         token = resp.get("nextPageToken")
         if not token:
             break
-    st.write(f"✅ **Drive indexing complete!** Total upserts: **{total}**")
+    st.write(f"✅ **Drive indexing complete!** Total chunks upserted: **{total_chunks}**")
     stats = index.describe_index_stats()
-    st.write(f"📦 Pinecone now has **{stats.get('total_vector_count',0)}** vectors.")
+    st.write(f"📦 Pinecone now has **{stats.get('total_vector_count',0)}** total vectors.")
 
 
 def fetch_and_index_web(query: str, top_k: int = 3) -> int:
@@ -134,7 +138,7 @@ def fetch_and_index_web(query: str, top_k: int = 3) -> int:
             continue
         emb = get_embedding(text)
         index.upsert(vectors=[(url, emb, {"name": res.get('title',url), "source": url})])
-        st.write(f"   ✅ Upserted web page: {res.get('title',url)}")
+        st.write(f"   ✅ Upserted web page: **{res.get('title',url)}**")
         total += 1
     st.write(f"✅ **Web indexing complete!** Total upserts: **{total}**")
     return total
@@ -151,11 +155,9 @@ def chat_with_context(query: str, include_web: bool, web_prompt: str) -> str:
     if include_web and web_prompt:
         fetch_and_index_web(web_prompt)
     docs = get_relevant_docs(query)
-    # Build context with explicit labels
     context_sections = [f"[Drive] {d}" for d in docs]
     if include_web and web_prompt:
         context_sections.append(f"[Web] {web_prompt}")
-    # Properly join context sections
     context = "\n\n---\n\n".join(context_sections)
     prompt = f"{query}\n\nContext:\n{context}"
     resp = client.chat.completions.create(
@@ -173,10 +175,7 @@ with st.sidebar:
         index_drive_docs()
     st.write("---")
     include_web = st.checkbox("Include web context in query")
-    if include_web:
-        web_prompt = st.text_input("Enter web search prompt:")
-    else:
-        web_prompt = ""
+    web_prompt = st.text_input("Enter web search prompt:") if include_web else ""
 
 st.write("---")
 query = st.text_input("Enter your strategic query:")

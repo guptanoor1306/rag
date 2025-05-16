@@ -74,7 +74,6 @@ def extract_text_from_drive_file(file_id: str, mime: str) -> str:
 
 
 def index_drive_docs(chunk_size: int = 3000):
-    """Indexes Docs/Slides/PDFs by splitting large texts into manageable chunks."""
     mime_filter = (
         "mimeType='application/pdf' or "
         "mimeType='application/vnd.google-apps.document' or "
@@ -101,7 +100,6 @@ def index_drive_docs(chunk_size: int = 3000):
             if not text:
                 st.write(f"   ⚠️ No extractable text for {name}.")
                 continue
-            # Split into chunks
             for i in range(0, len(text), chunk_size):
                 chunk = text[i:i+chunk_size]
                 chunk_id = f"{file_id}_chunk_{i//chunk_size}"
@@ -164,20 +162,19 @@ def chat_with_context(query: str, include_web: bool, web_prompt: str) -> str:
     docs = get_relevant_docs(query)
     if not docs:
         return "I’m sorry, I don’t have any information on that topic in the indexed files."
-    # Prepare explicit system prompt to stick to context
-    system_msg = (
-        "You are a knowledgeable assistant. Answer the user’s question strictly using the provided context. "
-        "If the answer cannot be found in the context, respond that you don’t know."
-    )
-    context = "\n\n---\n\n".join([f"[Drive] {d}" for d in docs])
+    # Build and inject context into system role
+    context = "\n\n---\n\n".join(docs)
     if include_web and web_prompt:
         context += "\n\n---\n\n[Web] " + web_prompt
-    user_msg = f"Question: {query}\n\nContext:\n{context}"
+    system_msg = (
+        f"You are a Zero1 strategy assistant. Answer the user’s question strictly using the following context. "
+        f"If the answer cannot be found in the context, say you don’t know.\n\nContext:\n{context}"
+    )
     resp = client.chat.completions.create(
         model="gpt-4",
         messages=[
             {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg}
+            {"role": "user", "content": query}
         ],
         temperature=0.0
     )

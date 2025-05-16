@@ -1,12 +1,13 @@
 # requirements.txt
 
 streamlit
-openai
+openai               # v1.x interface
 google-search-results
 PyDrive2
 google-api-python-client
 google-auth
-pinecone          # official SDK
+serpapi
+pinecone
 beautifulsoup4
 PyPDF2
 requests

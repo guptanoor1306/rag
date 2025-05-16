@@ -10,6 +10,9 @@ from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 from openai import OpenAI
 
+# --- STREAMLIT PAGE CONFIG ---
+st.set_page_config(page_title="Zero1 RAG Assistant", layout="wide")
+
 # --- STREAMLIT SECRETS & CONFIG ---
 OPENAI_KEY    = st.secrets["openai"]["api_key"]
 SERPAPI_KEY   = st.secrets["serpapi"]["api_key"]
@@ -83,6 +86,7 @@ def index_drive_docs():
             includeItemsFromAllDrives=True,
             supportsAllDrives=True
         ).execute()
+
         files = resp.get("files", [])
         st.write(f"🔍 Found **{len(files)}** files in folder {SHARED_FOLDER}:")
         for f in files:
@@ -95,9 +99,11 @@ def index_drive_docs():
             index.upsert(vectors=[(f["id"], emb, {"name": f["name"], "source": "drive"})])
             st.write(f"   ✅ Upserted vector for {f['name']}")
             total += 1
+
         token = resp.get("nextPageToken")
         if not token:
             break
+
     st.write(f"✅ **Indexing complete!** Upserted **{total}** vectors.")
     stats = index.describe_index_stats()
     st.write(f"📦 Pinecone now has **{stats.get('total_vector_count',0)}** vectors.")
@@ -146,10 +152,7 @@ def chat_with_context(query: str) -> str:
     resp = client.chat.completions.create(model="gpt-4", messages=msgs, temperature=0.7)
     return resp.choices[0].message.content
 
-# --- STREAMLIT UI ---
-st.set_page_config(page_title="Zero1 RAG Assistant", layout="wide")
-st.title("🔮 Zero1 RAG Assistant")
-
+# --- UI ---
 with st.sidebar:
     st.header("Actions")
     if st.button("Index Drive Folder"):

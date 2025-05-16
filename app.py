@@ -45,9 +45,11 @@ if INDEX_NAME not in pc.list_indexes().names():
     )
 index = pc.Index(INDEX_NAME)
 
-# Track already indexed file chunks to avoid duplicates
+# Track chunks and their text for retrieval
 if 'indexed_chunks' not in st.session_state:
     st.session_state['indexed_chunks'] = set()
+if 'chunk_texts' not in st.session_state:
+    st.session_state['chunk_texts'] = {}
 
 # --- Helper Functions ---
 
@@ -99,7 +101,6 @@ def index_drive_docs(chunk_size: int = 3000):
             if not text:
                 st.write(f"   ⚠️ No extractable text for {name}.")
                 continue
-            # Split into chunks to respect token limit
             for i in range(0, len(text), chunk_size):
                 chunk = text[i:i+chunk_size]
                 chunk_id = f"{file_id}_chunk_{i//chunk_size}"
@@ -107,6 +108,7 @@ def index_drive_docs(chunk_size: int = 3000):
                     continue
                 emb = get_embedding(chunk)
                 index.upsert(vectors=[(chunk_id, emb, {"name": name, "chunk_index": i//chunk_size, "source": "drive"})])
+                st.session_state['chunk_texts'][chunk_id] = chunk
                 st.session_state['indexed_chunks'].add(chunk_id)
                 total_chunks += 1
             st.write(f"   ✅ Indexed {((len(text)-1)//chunk_size)+1} chunks for {name}")
@@ -119,7 +121,6 @@ def index_drive_docs(chunk_size: int = 3000):
 
 
 def fetch_and_index_web(query: str, top_k: int = 3) -> int:
-    """Fetches top web results via SerpAPI and indexes them with logs."""
     st.write(f"🌐 **Fetching & indexing top {top_k} web results for** `{query}`")
     r = requests.get(
         "https://serpapi.com/search.json",
@@ -147,18 +148,19 @@ def fetch_and_index_web(query: str, top_k: int = 3) -> int:
 def get_relevant_docs(query: str, top_k: int = 5) -> list[str]:
     emb = get_embedding(query)
     res = index.query(vector=emb, top_k=top_k, include_metadata=True)
-    return [f"{m['metadata']['source']}: {m['metadata'].get('name','')}" for m in res["matches"]]
+    docs = []
+    for match in res["matches"]:
+        chunk_text = st.session_state['chunk_texts'].get(match['id'], '')
+        if chunk_text:
+            docs.append(chunk_text)
+    return docs
 
 
 def chat_with_context(query: str, include_web: bool, web_prompt: str) -> str:
-    # Assumes Drive indexing already done; optionally fetch web context
     if include_web and web_prompt:
         fetch_and_index_web(web_prompt)
     docs = get_relevant_docs(query)
-    context_sections = [f"[Drive] {d}" for d in docs]
-    if include_web and web_prompt:
-        context_sections.append(f"[Web] {web_prompt}")
-    context = "\n\n---\n\n".join(context_sections)
+    context = "\n\n---\n\n".join(docs)
     prompt = f"{query}\n\nContext:\n{context}"
     resp = client.chat.completions.create(
         model="gpt-4",

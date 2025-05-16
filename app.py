@@ -162,11 +162,13 @@ def chat_with_context(query: str) -> str:
 
 # --- UI ---
 st.title("🔮 Zero1 RAG Assistant")
+
 with st.sidebar:
     st.header("Actions")
     if st.button("Index Drive Folder"):
         index_drive_docs()
     st.write("---")
+    st.caption("🔍 Use this to pull additional web context, if desired.")
     web_q = st.text_input("Fetch & index web:")
     if st.button("Fetch Web") and web_q:
         fetch_and_index_web(web_q)
@@ -180,5 +182,23 @@ if st.button("Analyze") and user_q:
     st.write(ans)
 
 st.write("---")
+
+# 📊 Cost & Growth Analysis Section
 st.subheader("📊 Cost & Growth Analysis")
-st.info("Use pandas on the assistant’s outputs to model capex & growth.")
+# Input for initial capex
+initial_capex = st.number_input(
+    "Enter current annual CapEx (in crores):", min_value=0.0, step=1.0, format="%.2f"
+)
+# Input for growth multiple
+growth_factor = st.number_input(
+    "Enter desired growth multiple (e.g., 100 for 100× growth):", min_value=1.0, step=1.0, format="%.1f"
+)
+if st.button("Compute Cost Model"):
+    if initial_capex <= 0:
+        st.error("Please enter a valid initial CapEx greater than 0.")
+    else:
+        target_capex = initial_capex  # assuming capex remains same as OPEX? adjust logic as needed
+        growth_capex = initial_capex * growth_factor
+        st.write(f"- **Initial CapEx:** {initial_capex} crores")
+        st.write(f"- **Target CapEx for {growth_factor}× growth:** {growth_capex:.2f} crores")
+        st.success("Cost model computed! Adjust parameters as needed.")

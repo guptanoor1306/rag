@@ -1,13 +1,10 @@
-streamlit>=1.20
-openai>=0.27.0
-google-search-results>=2.1.0
-PyDrive2>=1.11.1
-google-api-python-client>=2.93.0
-google-auth>=2.20.0
-chromadb>=0.4.3
-duckdb>=0.8.1           # DuckDB+Parquet backend
-pysqlite3-binary>=0.7.0 # Override system sqlite3
-beautifulsoup4>=4.12.2
-PyPDF2>=3.0.0
-requests>=2.31.0
-protobuf<=3.20.3       # Avoid descriptor errors
+streamlit
+openai
+google-search-results
+PyDrive2
+google-api-python-client
+google-auth
+pinecone-client
+beautifulsoup4
+PyPDF2
+requests

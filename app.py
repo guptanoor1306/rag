@@ -1,12 +1,4 @@
 import os
-# Override built-in sqlite3 with a modern implementation to satisfy ChromaDB
-import pysqlite3 as sqlite3
-import sys
-sys.modules['sqlite3'] = sqlite3
-
-# Force ChromaDB to use DuckDB+Parquet backend
-os.environ["CHROMA_DB_IMPL"] = "duckdb+parquet"
-
 import tempfile
 import requests
 import streamlit as st
@@ -14,22 +6,23 @@ import openai
 from serpapi import GoogleSearch
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import chromadb
-from chromadb.config import Settings
-from chromadb.utils import embedding_functions
+import pinecone
 from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 
 # --- Configuration via Streamlit secrets ---
-# In your Streamlit Cloud app Settings → Secrets:
+# In Settings → Secrets:
 # [openai]
 # api_key = "YOUR_OPENAI_API_KEY"
 # [serpapi]
 # api_key = "YOUR_SERPAPI_KEY"
 # [gcp]
-# service_account = '''{...YOUR_SERVICE_ACCOUNT_JSON...}'''
+# service_account = '''{...SERVICE_ACCOUNT_JSON...}'''
+# [pinecone]
+# api_key = "YOUR_PINECONE_API_KEY"
+# environment = "YOUR_PINECONE_ENVIRONMENT"
 
-# Load API keys and credentials
+# Load credentials
 openai.api_key = st.secrets.openai.api_key
 SERPAPI_KEY   = st.secrets.serpapi.api_key
 
@@ -40,22 +33,25 @@ credentials   = service_account.Credentials.from_service_account_info(
 )
 drive_service = build('drive', 'v3', credentials=credentials)
 
-# Initialize ChromaDB client with DuckDB+Parquet
-chroma_client = chromadb.Client(Settings(
-    chroma_db_impl="duckdb+parquet",
-    persist_directory="./chroma_storage"
-))
-embedding_fn = embedding_functions.OpenAIEmbeddingFunction(
-    api_key=openai.api_key,
-    model_name="text-embedding-ada-002"
+# Initialize Pinecone
+pinecone.init(
+    api_key=st.secrets.pinecone.api_key,
+    environment=st.secrets.pinecone.environment
 )
-try:
-    collection = chroma_client.get_collection(name="zero1")
-except Exception:
-    collection = chroma_client.create_collection(
-        name="zero1",
-        embedding_function=embedding_fn
+index_name = "zero1"
+# Create index if it doesn't exist
+if index_name not in pinecone.list_indexes():
+    # 1536 is the dimensionality of text-embedding-ada-002
+    pinecone.create_index(index_name, dimension=1536, metric="cosine")
+index = pinecone.Index(index_name)
+
+# Utility: get embedding
+def get_embedding(text: str) -> list:
+    resp = openai.Embedding.create(
+        model="text-embedding-ada-002",
+        input=text
     )
+    return resp['data'][0]['embedding']
 
 # Extract text from Google Drive files
 def extract_text_from_drive_file(file_id, mime_type):
@@ -69,12 +65,10 @@ def extract_text_from_drive_file(file_id, mime_type):
             fh.write(resp.content)
             tmp_path = fh.name
         text = []
-        reader = PdfReader(tmp_path)
-        for page in reader.pages:
-            txt = page.extract_text()
-            if txt:
-                text.append(txt)
-        return '\n'.join(text)
+        for page in PdfReader(tmp_path).pages:
+            txt = page.extract_text() or ""
+            text.append(txt)
+        return "\n".join(text)
     else:
         return drive_service.files().export(
             fileId=file_id,
@@ -83,7 +77,7 @@ def extract_text_from_drive_file(file_id, mime_type):
 
 # Index all Docs, Slides, and PDFs from Google Drive
 def index_drive_docs():
-    with st.spinner("Indexing Google Drive documents..."):
+    with st.spinner("Indexing Google Drive..."):
         token = None
         while True:
             res = drive_service.files().list(
@@ -95,8 +89,9 @@ def index_drive_docs():
                 txt = extract_text_from_drive_file(f['id'], f['mimeType'])
                 if not txt:
                     continue
-                emb = embedding_fn(txt)
-                collection.upsert([{ 'id': f['id'], 'embedding': emb, 'metadata': {'name': f['name'], 'source': 'drive'} }])
+                emb = get_embedding(txt)
+                meta = {"name": f['name'], "source": "drive"}
+                index.upsert(vectors=[(f['id'], emb, meta)])
             token = res.get('nextPageToken')
             if not token:
                 break
@@ -104,41 +99,45 @@ def index_drive_docs():
 
 # Fetch and index top-k web results via SerpAPI
 def fetch_and_index_web(query, top_k=3):
-    with st.spinner(f"Fetching web results for '{query}'..."):
+    with st.spinner(f"Fetching web for '{query}'..."):
         client = GoogleSearch({"q": query, "api_key": SERPAPI_KEY})
-        results = client.get_dict().get('organic_results', [])[:top_k]
-        for r in results:
+        for r in client.get_dict().get('organic_results', [])[:top_k]:
             url = r.get('link')
             if not url:
                 continue
-            resp = requests.get(url, timeout=10)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            text = ' '.join(p.get_text() for p in soup.find_all('p'))
+            html = requests.get(url, timeout=10).text
+            text = " ".join(p.get_text() for p in BeautifulSoup(html, 'html.parser').find_all('p'))
             if not text:
                 continue
-            emb = embedding_fn(text)
-            collection.upsert([{ 'id': url, 'embedding': emb, 'metadata': {'name': r.get('title', url), 'source': url} }])
+            emb = get_embedding(text)
+            meta = {"name": r.get('title', url), "source": url}
+            index.upsert(vectors=[(url, emb, meta)])
         st.success("Web indexing complete!")
 
-# Retrieve top-k docs from vector store
-def get_relevant_docs(query, top_k=5):
-    res = collection.query(query_texts=[query], n_results=top_k)
-    return res['documents'][0]
+# Retrieve top-k contexts from Pinecone
+def get_relevant_docs(query: str, top_k: int = 5) -> list:
+    emb = get_embedding(query)
+    res = index.query(vector=emb, top_k=top_k, include_metadata=True)
+    return [match['metadata']['source'] + ": " + match['metadata'].get('name','') for match in res['matches']]
 
 # Chat with context
-def chat_with_context(query):
+def chat_with_context(query: str) -> str:
     docs = get_relevant_docs(query)
-    ctx = "\n\n---\n\n".join(docs)
+    context = "\n\n---\n\n".join(docs)
     messages = [
-        {"role": "system", "content": "You are a Zero1 strategist. Provide actionable, data-driven recommendations."},
-        {"role": "user", "content": f"{query}\n\nContext:\n{ctx}"}
+        {"role": "system", "content": "You are a Zero1 strategy assistant."},
+        {"role": "user", "content": f"{query}\n\nContext:\n{context}"}
     ]
-    resp = openai.ChatCompletion.create(model="gpt-4", messages=messages, temperature=0.7)
+    resp = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=messages,
+        temperature=0.7
+    )
     return resp.choices[0].message.content
 
-# Streamlit UI
-st.set_page_config(page_title="Zero1 Strategy RAG Assistant", layout="wide")
-st.title("🔮 Zero1 Strategy RAG Assistant")
+# --- Streamlit UI ---
+st.set_page_config(page_title="Zero1 RAG Assistant", layout="wide")
+st.title("🔮 Zero1 RAG Assistant")
 
 with st.sidebar:
     st.header("Indexing")
@@ -150,13 +149,13 @@ with st.sidebar:
         fetch_and_index_web(web_q)
 
 st.write("---")
-query = st.text_input("Ask a question about Zero1:")
-if st.button("Analyze") and query:
+user_query = st.text_input("Ask your strategic question:")
+if st.button("Analyze") and user_query:
     with st.spinner("Analyzing..."):
-        answer = chat_with_context(query)
+        answer = chat_with_context(user_query)
     st.markdown("**Response:**")
     st.write(answer)
 
 st.write("---")
 st.subheader("📊 Cost & Growth Analysis")
-st.info("Use pandas on numeric outputs to model X crore capex and 100× growth.")
+st.info("Use pandas on the assistant’s numeric outputs to model X crore capex and 100× growth.")

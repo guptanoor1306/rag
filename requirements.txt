@@ -1,5 +1,3 @@
-# requirements.txt
-
 streamlit
 openai               # v1.x client
 requests

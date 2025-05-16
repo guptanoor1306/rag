@@ -4,7 +4,7 @@ google-search-results
 PyDrive2
 google-api-python-client
 google-auth
-pinecone-client
+pinecone          # use the official Pinecone SDK (not pinecone-client)
 beautifulsoup4
 PyPDF2
 requests

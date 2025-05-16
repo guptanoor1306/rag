@@ -7,6 +7,7 @@ from serpapi import GoogleSearch
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import pinecone
+import json
 from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 
@@ -26,7 +27,8 @@ from PyPDF2 import PdfReader
 openai.api_key = st.secrets.openai.api_key
 SERPAPI_KEY   = st.secrets.serpapi.api_key
 
-gcp_info      = st.secrets.gcp.service_account
+gcp_info_json = st.secrets.gcp.service_account
+gcp_info      = json.loads(gcp_info_json)
 credentials   = service_account.Credentials.from_service_account_info(
     gcp_info,
     scopes=["https://www.googleapis.com/auth/drive.readonly"]

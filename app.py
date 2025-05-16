@@ -13,7 +13,7 @@ from openai import OpenAI
 # --- STREAMLIT PAGE CONFIG ---
 st.set_page_config(page_title="Zero1 RAG Assistant", layout="wide")
 
-# --- STREAMLIT SECRETS & CONFIG ---
+# --- SECRETS & CONFIG ---
 OPENAI_KEY    = st.secrets["openai"]["api_key"]
 SERPAPI_KEY   = st.secrets["serpapi"]["api_key"]
 PINECONE_KEY  = st.secrets["pinecone"]["api_key"]
@@ -45,7 +45,7 @@ if INDEX_NAME not in pc.list_indexes().names():
     )
 index = pc.Index(INDEX_NAME)
 
-# Track chunks and their text for retrieval
+# Session state for chunks
 if 'indexed_chunks' not in st.session_state:
     st.session_state['indexed_chunks'] = set()
 if 'chunk_texts' not in st.session_state:
@@ -101,6 +101,7 @@ def index_drive_docs(chunk_size: int = 3000):
             if not text:
                 st.write(f"   ⚠️ No extractable text for {name}.")
                 continue
+            # Split into chunks
             for i in range(0, len(text), chunk_size):
                 chunk = text[i:i+chunk_size]
                 chunk_id = f"{file_id}_chunk_{i//chunk_size}"
@@ -157,15 +158,28 @@ def get_relevant_docs(query: str, top_k: int = 5) -> list[str]:
 
 
 def chat_with_context(query: str, include_web: bool, web_prompt: str) -> str:
+    # Optionally fetch web context
     if include_web and web_prompt:
         fetch_and_index_web(web_prompt)
     docs = get_relevant_docs(query)
-    context = "\n\n---\n\n".join(docs)
-    prompt = f"{query}\n\nContext:\n{context}"
+    if not docs:
+        return "I’m sorry, I don’t have any information on that topic in the indexed files."
+    # Prepare explicit system prompt to stick to context
+    system_msg = (
+        "You are a knowledgeable assistant. Answer the user’s question strictly using the provided context. "
+        "If the answer cannot be found in the context, respond that you don’t know."
+    )
+    context = "\n\n---\n\n".join([f"[Drive] {d}" for d in docs])
+    if include_web and web_prompt:
+        context += "\n\n---\n\n[Web] " + web_prompt
+    user_msg = f"Question: {query}\n\nContext:\n{context}"
     resp = client.chat.completions.create(
         model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg}
+        ],
+        temperature=0.0
     )
     return resp.choices[0].message.content
 

@@ -45,6 +45,10 @@ if INDEX_NAME not in pc.list_indexes().names():
     )
 index = pc.Index(INDEX_NAME)
 
+# Track already indexed files to avoid duplicates
+if 'indexed_files' not in st.session_state:
+    st.session_state['indexed_files'] = set()
+
 # --- Helper Functions ---
 
 def get_embedding(text: str) -> list:
@@ -87,6 +91,12 @@ def index_drive_docs():
         files = resp.get("files", [])
         st.write(f"🔍 Found **{len(files)}** files in folder {SHARED_FOLDER}:")
         for f in files:
+            file_id = f['id']
+            name, mime = f['name'], f['mimeType']
+            if file_id in st.session_state['indexed_files']:
+                st.write(f"   ↪️ Already indexed **{name}**; skipping.")
+                continue
+            st.write(f" • **{name}** (`{mime}`)")
             name, mime = f['name'], f['mimeType']
             st.write(f" • **{name}** (`{mime}`)")
             txt = extract_text_from_drive_file(f['id'], mime)
@@ -94,7 +104,8 @@ def index_drive_docs():
                 st.write(f"   ⚠️ No text extracted for {name}")
                 continue
             emb = get_embedding(txt)
-            index.upsert(vectors=[(f['id'], emb, {"name": name, "source": "drive"})])
+            index.upsert(vectors=[(file_id, emb, {"name": name, "source": "drive"})])
+            st.session_state['indexed_files'].add(file_id)
             st.write(f"   ✅ Upserted vector for {name}")
             total += 1
         token = resp.get("nextPageToken")
@@ -139,16 +150,22 @@ def get_relevant_docs(query: str, top_k: int = 5) -> list[str]:
 
 
 def chat_with_context(query: str, include_web: bool, web_prompt: str) -> str:
-    # Re-index Drive docs first for up-to-date context
-    index_drive_docs()
+    # Assumes Drive indexing already done; optionally fetch web context
     if include_web and web_prompt:
         fetch_and_index_web(web_prompt)
     docs = get_relevant_docs(query)
     context_sections = [f"[Drive] {d}" for d in docs]
     if include_web and web_prompt:
         context_sections += [f"[Web] {web_prompt}"]
-    context = "\n\n---\n\n".join(context_sections)
-    prompt = query + "\n\nContext:\n" + context
+    context = "
+
+---
+
+".join(context_sections)
+    prompt = query + "
+
+Context:
+" + context
     resp = client.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],

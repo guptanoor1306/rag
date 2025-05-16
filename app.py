@@ -13,7 +13,7 @@ from openai import OpenAI
 # --- STREAMLIT PAGE CONFIG ---
 st.set_page_config(page_title="Zero1 RAG Assistant", layout="wide")
 
-# --- SECRETS & CONFIG ---
+# --- STREAMLIT SECRETS & CONFIG ---
 OPENAI_KEY    = st.secrets["openai"]["api_key"]
 SERPAPI_KEY   = st.secrets["serpapi"]["api_key"]
 PINECONE_KEY  = st.secrets["pinecone"]["api_key"]
@@ -45,14 +45,6 @@ if INDEX_NAME not in pc.list_indexes().names():
     )
 index = pc.Index(INDEX_NAME)
 
-# Session state for chunks
-def initialize_state():
-    if 'indexed_chunks' not in st.session_state:
-        st.session_state['indexed_chunks'] = set()
-    if 'chunk_texts' not in st.session_state:
-        st.session_state['chunk_texts'] = {}
-initialize_state()
-
 # --- Helper Functions ---
 
 def get_embedding(text: str) -> list:
@@ -75,15 +67,15 @@ def extract_text_from_drive_file(file_id: str, mime: str) -> str:
         return drive_service.files().export(fileId=file_id, mimeType="text/plain").execute().decode("utf-8")
 
 
-def index_drive_docs(chunk_size: int = 3000):
+def index_drive_docs():
+    """Real-time indexing logs and upserts for Drive files."""
     mime_filter = (
         "mimeType='application/pdf' or "
         "mimeType='application/vnd.google-apps.document' or "
         "mimeType='application/vnd.google-apps.presentation'"
     )
-    total_chunks = 0
-    st.write("🚀 Indexing Drive folder with chunking...")
-    token = None
+    token, total = None, 0
+    st.write("🚀 **Starting Drive folder indexing...**")
     while True:
         resp = drive_service.files().list(
             q=f"'{SHARED_FOLDER}' in parents and ({mime_filter})",
@@ -93,74 +85,94 @@ def index_drive_docs(chunk_size: int = 3000):
             supportsAllDrives=True
         ).execute()
         files = resp.get("files", [])
-        st.write(f"🔍 Found {len(files)} files to index.")
+        st.write(f"🔍 Found **{len(files)}** files in folder {SHARED_FOLDER}:")
         for f in files:
-            file_id, name, mime = f['id'], f['name'], f['mimeType']
-            text = extract_text_from_drive_file(file_id, mime)
-            if not text:
+            name, mime = f['name'], f['mimeType']
+            st.write(f" • **{name}** (`{mime}`)")
+            txt = extract_text_from_drive_file(f['id'], mime)
+            if not txt:
+                st.write(f"   ⚠️ No text extracted for {name}")
                 continue
-            for i in range(0, len(text), chunk_size):
-                chunk = text[i:i+chunk_size]
-                chunk_id = f"{file_id}_chunk_{i//chunk_size}"
-                if chunk_id in st.session_state['indexed_chunks']:
-                    continue
-                emb = get_embedding(chunk)
-                index.upsert(vectors=[(chunk_id, emb, {})])
-                st.session_state['chunk_texts'][chunk_id] = chunk
-                st.session_state['indexed_chunks'].add(chunk_id)
-                total_chunks += 1
+            emb = get_embedding(txt)
+            index.upsert(vectors=[(f['id'], emb, {"name": name, "source": "drive"})])
+            st.write(f"   ✅ Upserted vector for {name}")
+            total += 1
         token = resp.get("nextPageToken")
         if not token:
             break
-    st.write(f"✅ Drive indexing complete! {total_chunks} chunks stored.")
+    st.write(f"✅ **Drive indexing complete!** Total upserts: **{total}**")
+    stats = index.describe_index_stats()
+    st.write(f"📦 Pinecone now has **{stats.get('total_vector_count',0)}** vectors.")
+    return total
 
 
-def fetch_and_index_web(query: str, top_k: int = 3) -> None:
-    st.write(f"🌐 Fetching top {top_k} web results for '{query}'...")
-    r = requests.get("https://serpapi.com/search.json", params={"q": query, "api_key": SERPAPI_KEY})
+def fetch_and_index_web(query: str, top_k: int = 3) -> int:
+    """Fetches top web results via SerpAPI and indexes them with logs."""
+    st.write(f"🌐 **Fetching & indexing top {top_k} web results for** `{query}`")
+    r = requests.get(
+        "https://serpapi.com/search.json",
+        params={"q": query, "api_key": SERPAPI_KEY}
+    )
+    total = 0
     for res in r.json().get("organic_results", [])[:top_k]:
-        url, title = res.get("link"), res.get("title")
+        url = res.get("link")
         if not url:
             continue
+        st.write(f" • Fetching **{res.get('title',url)}**")
         html = requests.get(url, timeout=10).text
         text = " ".join(p.get_text() for p in BeautifulSoup(html, "html.parser").find_all("p"))
         if not text:
+            st.write(f"   ⚠️ No text from {url}")
             continue
         emb = get_embedding(text)
-        index.upsert(vectors=[(url, emb, {})])
+        index.upsert(vectors=[(url, emb, {"name": res.get('title',url), "source": url})])
+        st.write(f"   ✅ Upserted web page: {res.get('title',url)}")
+        total += 1
+    st.write(f"✅ **Web indexing complete!** Total upserts: **{total}**")
+    return total
 
 
 def get_relevant_docs(query: str, top_k: int = 5) -> list[str]:
     emb = get_embedding(query)
     res = index.query(vector=emb, top_k=top_k, include_metadata=True)
-    return [st.session_state['chunk_texts'][m['id']] for m in res['matches']]
+    return [f"{m['metadata']['source']}: {m['metadata'].get('name','')}" for m in res["matches"]]
 
 
 def chat_with_context(query: str, include_web: bool, web_prompt: str) -> str:
+    # Re-index Drive docs first for up-to-date context
+    index_drive_docs()
     if include_web and web_prompt:
         fetch_and_index_web(web_prompt)
     docs = get_relevant_docs(query)
-    if not docs:
-        return "I’m sorry, I don’t have information on that topic."
-    context = "\n\n---\n\n".join(docs)
-    messages = [
-        {"role": "system", "content": "You are a Zero1 strategist. Use only the provided context to answer."},
-        {"role": "user", "content": f"{query}\n\nContext:\n{context}"}
-    ]
-    resp = client.chat.completions.create(model="gpt-4", messages=messages, temperature=0.0)
+    context_sections = [f"[Drive] {d}" for d in docs]
+    if include_web and web_prompt:
+        context_sections += [f"[Web] {web_prompt}"]
+    context = "\n\n---\n\n".join(context_sections)
+    prompt = query + "\n\nContext:\n" + context
+    resp = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7
+    )
     return resp.choices[0].message.content
 
 # --- UI ---
 st.title("🔮 Zero1 RAG Assistant")
 with st.sidebar:
-    if st.button("Index Drive Folder"): index_drive_docs()
+    st.header("Actions")
+    if st.button("Index Drive Folder"):
+        index_drive_docs()
     st.write("---")
-    include_web = st.checkbox("Include web context")
-    web_prompt = st.text_input("Web prompt:") if include_web else ""
+    include_web = st.checkbox("Include web context in query")
+    if include_web:
+        web_prompt = st.text_input("Enter web search prompt:")
+    else:
+        web_prompt = ""
 
-query = st.text_input("Your query:")
+st.write("---")
+query = st.text_input("Enter your strategic query:")
 if st.button("Analyze") and query:
-    with st.spinner("Thinking..."):
+    with st.spinner("Processing..."):
         answer = chat_with_context(query, include_web, web_prompt)
     st.markdown("**Response:**")
     st.write(answer)

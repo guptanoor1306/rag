@@ -1,8 +1,7 @@
 # requirements.txt
 
 streamlit
-openai               # v1.x interface
-google-search-results
+openai               # v1.x client
 PyDrive2
 google-api-python-client
 google-auth

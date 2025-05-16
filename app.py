@@ -1,5 +1,10 @@
 import os
-# Force ChromaDB to use DuckDB+Parquet backend to avoid SQLite version issues
+# Override built-in sqlite3 with a modern implementation to satisfy ChromaDB
+import pysqlite3 as sqlite3
+import sys
+sys.modules['sqlite3'] = sqlite3
+
+# Force ChromaDB to use DuckDB+Parquet backend
 os.environ["CHROMA_DB_IMPL"] = "duckdb+parquet"
 
 import tempfile
@@ -16,7 +21,7 @@ from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 
 # --- Configuration via Streamlit secrets ---
-# In your Streamlit Cloud app settings, add under Settings → Secrets:
+# In your Streamlit Cloud app Settings → Secrets:
 # [openai]
 # api_key = "YOUR_OPENAI_API_KEY"
 # [serpapi]
@@ -24,16 +29,15 @@ from PyPDF2 import PdfReader
 # [gcp]
 # service_account = '''{...YOUR_SERVICE_ACCOUNT_JSON...}'''
 
-# Load credentials
+# Load API keys and credentials
 openai.api_key = st.secrets.openai.api_key
-SERPAPI_KEY = st.secrets.serpapi.api_key
+SERPAPI_KEY   = st.secrets.serpapi.api_key
 
-gcp_info = st.secrets.gcp.service_account
-credentials = service_account.Credentials.from_service_account_info(
+gcp_info      = st.secrets.gcp.service_account
+credentials   = service_account.Credentials.from_service_account_info(
     gcp_info,
     scopes=["https://www.googleapis.com/auth/drive.readonly"]
 )
-
 drive_service = build('drive', 'v3', credentials=credentials)
 
 # Initialize ChromaDB client with DuckDB+Parquet
@@ -45,7 +49,6 @@ embedding_fn = embedding_functions.OpenAIEmbeddingFunction(
     api_key=openai.api_key,
     model_name="text-embedding-ada-002"
 )
-# Create or get the "zero1" collection
 try:
     collection = chroma_client.get_collection(name="zero1")
 except Exception:
@@ -54,7 +57,7 @@ except Exception:
         embedding_function=embedding_fn
     )
 
-# Utility to extract text from Drive files
+# Extract text from Google Drive files
 def extract_text_from_drive_file(file_id, mime_type):
     if mime_type == 'application/pdf':
         resp = requests.get(
@@ -117,7 +120,7 @@ def fetch_and_index_web(query, top_k=3):
             collection.upsert([{ 'id': url, 'embedding': emb, 'metadata': {'name': r.get('title', url), 'source': url} }])
         st.success("Web indexing complete!")
 
-# Retrieve top-k docs from the vector store
+# Retrieve top-k docs from vector store
 def get_relevant_docs(query, top_k=5):
     res = collection.query(query_texts=[query], n_results=top_k)
     return res['documents'][0]

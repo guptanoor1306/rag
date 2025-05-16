@@ -2,10 +2,10 @@
 
 streamlit
 openai               # v1.x client
-PyDrive2
+requests
 google-api-python-client
 google-auth
+PyDrive2
 pinecone             # official SDK
 beautifulsoup4
 PyPDF2
-requests

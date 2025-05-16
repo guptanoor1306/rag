@@ -5,7 +5,7 @@ import json
 import tempfile
 import requests
 import streamlit as st
-from serpapi import GoogleSearch
+from google_search_results import GoogleSearch
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from pinecone import Pinecone, ServerlessSpec
@@ -14,7 +14,6 @@ from PyPDF2 import PdfReader
 from openai import OpenAI
 
 # --- STREAMLIT SECRETS & CONFIG ---
-# Secrets (see above) are stored in st.secrets
 OPENAI_KEY    = st.secrets["openai"]["api_key"]
 SERPAPI_KEY   = st.secrets["serpapi"]["api_key"]
 PINECONE_KEY  = st.secrets["pinecone"]["api_key"]
@@ -72,7 +71,6 @@ def extract_text_from_drive_file(fid: str, mime: str) -> str:
         return data.decode("utf-8")
 
 def index_drive_docs():
-    """Index only the files in the shared folder."""
     with st.spinner("Indexing Drive folder…"):
         token = None
         while True:
@@ -88,33 +86,26 @@ def index_drive_docs():
             ).execute()
             for f in resp.get("files", []):
                 txt = extract_text_from_drive_file(f["id"], f["mimeType"])
-                if not txt:
-                    continue
+                if not txt: continue
                 emb  = get_embedding(txt)
                 meta = {"name": f["name"], "source": "drive"}
                 index.upsert(vectors=[(f["id"], emb, meta)])
             token = resp.get("nextPageToken")
-            if not token:
-                break
+            if not token: break
         st.success("Drive folder indexed!")
 
 def fetch_and_index_web(query: str, top_k: int = 3):
     with st.spinner(f"Fetching web for '{query}'…"):
-        results = (
-            GoogleSearch({"q": query, "api_key": SERPAPI_KEY})
-            .get_dict()
-            .get("organic_results", [])[:top_k]
-        )
+        client = GoogleSearch({"q": query, "api_key": SERPAPI_KEY})
+        results = client.get_dict().get("organic_results", [])[:top_k]
         for r in results:
             url = r.get("link")
-            if not url:
-                continue
+            if not url: continue
             html = requests.get(url, timeout=10).text
             text = " ".join(
                 p.get_text() for p in BeautifulSoup(html, "html.parser").find_all("p")
             )
-            if not text:
-                continue
+            if not text: continue
             emb  = get_embedding(text)
             meta = {"name": r.get("title", url), "source": url}
             index.upsert(vectors=[(url, emb, meta)])
@@ -164,4 +155,4 @@ if st.button("Analyze") and user_q:
 
 st.write("---")
 st.subheader("📊 Cost & Growth Analysis")
-st.info("Parse the assistant’s numeric outputs with pandas to model X-crore capex & growth.")
+st.info("Parse the assistant’s numeric outputs with pandas to model capex & growth.")

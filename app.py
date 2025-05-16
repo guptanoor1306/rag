@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 from openai import OpenAI
 
-# --- CONFIGURATION via st.secrets ---
+# --- STREAMLIT SECRETS & CONFIG ---
 OPENAI_KEY    = st.secrets["openai"]["api_key"]
 SERPAPI_KEY   = st.secrets["serpapi"]["api_key"]
 PINECONE_KEY  = st.secrets["pinecone"]["api_key"]
@@ -18,14 +18,20 @@ PINECONE_ENV  = st.secrets["pinecone"]["environment"]
 GCP_JSON      = st.secrets["gcp"]["service_account"]
 SHARED_FOLDER = st.secrets["drive"]["folder_id"]
 
-# Initialize OpenAI
+# Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_KEY)
 
-# Google Drive API setup
-gcp_info = json.loads(GCP_JSON)
+# Debug GCP project and service account
+try:
+    gcp_info = json.loads(GCP_JSON)
+    st.write("⚙️ Using GCP project:", gcp_info.get("project_id"))
+    st.write("⚙️ Service account:", gcp_info.get("client_email"))
+except Exception as e:
+    st.error(f"Error parsing GCP credentials: {e}")
+
+# Setup Google Drive API
 credentials = service_account.Credentials.from_service_account_info(
-    gcp_info,
-    scopes=["https://www.googleapis.com/auth/drive.readonly"]
+    gcp_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
 )
 drive_service = build("drive", "v3", credentials=credentials)
 
@@ -42,16 +48,19 @@ if INDEX_NAME not in pc.list_indexes().names():
     )
 index = pc.Index(INDEX_NAME)
 
-# Helpers
+# --- Helper Functions ---
+
 def get_embedding(text: str) -> list:
     resp = client.embeddings.create(model="text-embedding-ada-002", input=text)
     return resp.data[0].embedding
+
 
 def extract_text_from_drive_file(file_id: str, mime: str) -> str:
     if mime == "application/pdf":
         r = requests.get(
             f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media",
-            headers={"Authorization": f"Bearer {credentials.token}"}
+            headers={"Authorization": f"Bearer {credentials.token}"},
+            stream=True
         )
         with tempfile.NamedTemporaryFile(delete=False) as fh:
             fh.write(r.content)
@@ -61,28 +70,21 @@ def extract_text_from_drive_file(file_id: str, mime: str) -> str:
         data = drive_service.files().export(fileId=file_id, mimeType="text/plain").execute()
         return data.decode("utf-8")
 
-# Index Drive folder
+
 def index_drive_docs():
     st.write("🚀 **Starting Drive folder indexing...**")
     total = 0
     token = None
     while True:
         resp = drive_service.files().list(
-            q=(
-                f"'{SHARED_FOLDER}' in parents and "
-                "(mimeType='application/pdf' or "
-                "mimeType contains 'document' or "
-                "mimeType contains 'presentation')"
-            ),
+            q=f"'{SHARED_FOLDER}' in parents",
             fields="nextPageToken, files(id,name,mimeType)",
             pageToken=token,
             includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-            corpora="allDrives"
+            supportsAllDrives=True
         ).execute()
-
         files = resp.get("files", [])
-        st.write(f"🔍 Found **{len(files)}** files:")
+        st.write(f"🔍 Found **{len(files)}** files in folder {SHARED_FOLDER}:")
         for f in files:
             st.write(f" • **{f['name']}** (`{f['mimeType']}`)")
             txt = extract_text_from_drive_file(f["id"], f["mimeType"])
@@ -93,45 +95,54 @@ def index_drive_docs():
             index.upsert(vectors=[(f["id"], emb, {"name": f["name"], "source": "drive"})])
             st.write(f"   ✅ Upserted vector for {f['name']}")
             total += 1
-
         token = resp.get("nextPageToken")
         if not token:
             break
-
     st.write(f"✅ **Indexing complete!** Upserted **{total}** vectors.")
     stats = index.describe_index_stats()
-    st.write(f"📦 Pinecone now has {stats.get('total_vector_count',0)} vectors.")
+    st.write(f"📦 Pinecone now has **{stats.get('total_vector_count',0)}** vectors.")
 
-# Fetch & index web
-def fetch_and_index_web(query: str, top_k: int =3):
-    st.write(f"🌐 Fetching & indexing top {top_k} web results for '{query}'")
+
+def fetch_and_index_web(query: str, top_k: int = 3):
+    st.write(f"🌐 **Fetching & indexing top {top_k} web results for** `{query}`")
     r = requests.get(
         "https://serpapi.com/search.json",
-        params={"q":query, "api_key":SERPAPI_KEY}
+        params={"q": query, "api_key": SERPAPI_KEY}
     )
     data = r.json()
-    for r in data.get("organic_results", [])[:top_k]:
-        url = r.get("link")
-        if not url: continue
+    for res in data.get("organic_results", [])[:top_k]:
+        url = res.get("link")
+        if not url:
+            continue
         html = requests.get(url, timeout=10).text
-        text = " ".join(p.get_text() for p in BeautifulSoup(html,"html.parser").find_all("p"))
-        if not text: continue
+        text = " ".join(
+            p.get_text() for p in BeautifulSoup(html, "html.parser").find_all("p")
+        )
+        if not text:
+            continue
         emb = get_embedding(text)
-        index.upsert(vectors=[(url, emb, {"name":r.get("title",url),"source":url})])
-        st.write(f"   🔹 Indexed web page: {r.get('title',url)}")
+        meta = {"name": res.get("title", url), "source": url}
+        index.upsert(vectors=[(url, emb, meta)])
+        st.write(f"   🔹 Indexed web page: **{res.get('title',url)}**")
     st.write("✅ **Web indexing complete!**")
 
-# Query & chat
-def get_relevant_docs(query: str, top_k:int=5)->list[str]:
+
+def get_relevant_docs(query: str, top_k: int = 5) -> list[str]:
     emb = get_embedding(query)
     res = index.query(vector=emb, top_k=top_k, include_metadata=True)
-    return [f"{m['metadata']['source']}: {m['metadata'].get('name','')}" for m in res["matches"]]
+    return [
+        f"{m['metadata']['source']}: {m['metadata'].get('name','')}"
+        for m in res["matches"]
+    ]
 
-def chat_with_context(query: str)->str:
+
+def chat_with_context(query: str) -> str:
     docs = get_relevant_docs(query)
     ctx = "\n\n---\n\n".join(docs)
-    msgs = [{"role":"system","content":"You are a Zero1 strategy assistant."},
-            {"role":"user","content":f"{query}\n\nContext:\n{ctx}"}]
+    msgs = [
+        {"role": "system", "content": "You are a Zero1 strategy assistant."},
+        {"role": "user",   "content": f"{query}\n\nContext:\n{ctx}"}
+    ]
     resp = client.chat.completions.create(model="gpt-4", messages=msgs, temperature=0.7)
     return resp.choices[0].message.content
 

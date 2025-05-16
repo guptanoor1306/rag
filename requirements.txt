@@ -8,3 +8,4 @@ pinecone-client
 beautifulsoup4
 PyPDF2
 requests
+pysqlite3

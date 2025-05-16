@@ -5,7 +5,6 @@ import json
 import tempfile
 import requests
 import streamlit as st
-from google_search_results import GoogleSearch
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from pinecone import Pinecone, ServerlessSpec
@@ -13,7 +12,8 @@ from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 from openai import OpenAI
 
-# --- STREAMLIT SECRETS & CONFIG ---
+# --- SETTINGS VIA st.secrets ---
+
 OPENAI_KEY    = st.secrets["openai"]["api_key"]
 SERPAPI_KEY   = st.secrets["serpapi"]["api_key"]
 PINECONE_KEY  = st.secrets["pinecone"]["api_key"]
@@ -21,17 +21,18 @@ PINECONE_ENV  = st.secrets["pinecone"]["environment"]
 GCP_JSON      = st.secrets["gcp"]["service_account"]
 SHARED_FOLDER = st.secrets["drive"]["folder_id"]
 
-# Initialize OpenAI v1 client
+# OpenAI client (v1)
 client = OpenAI(api_key=OPENAI_KEY)
 
-# Initialize Google Drive service
+# Drive API setup
 gcp_info = json.loads(GCP_JSON)
 creds    = service_account.Credentials.from_service_account_info(
-    gcp_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+    gcp_info,
+    scopes=["https://www.googleapis.com/auth/drive.readonly"]
 )
 drive_service = build("drive", "v3", credentials=creds)
 
-# Initialize Pinecone
+# Pinecone setup
 pc = Pinecone(api_key=PINECONE_KEY, environment=PINECONE_ENV)
 region, cloud = PINECONE_ENV.split("-", 1)
 INDEX_NAME = "zero1"
@@ -47,10 +48,7 @@ index = pc.Index(INDEX_NAME)
 # --- HELPERS ---
 
 def get_embedding(text: str) -> list:
-    resp = client.embeddings.create(
-        model="text-embedding-ada-002",
-        input=text
-    )
+    resp = client.embeddings.create(model="text-embedding-ada-002", input=text)
     return resp["data"][0]["embedding"]
 
 def extract_text_from_drive_file(fid: str, mime: str) -> str:
@@ -65,9 +63,7 @@ def extract_text_from_drive_file(fid: str, mime: str) -> str:
             path = fh.name
         return "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
     else:
-        data = drive_service.files().export(
-            fileId=fid, mimeType="text/plain"
-        ).execute()
+        data = drive_service.files().export(fileId=fid, mimeType="text/plain").execute()
         return data.decode("utf-8")
 
 def index_drive_docs():
@@ -96,8 +92,13 @@ def index_drive_docs():
 
 def fetch_and_index_web(query: str, top_k: int = 3):
     with st.spinner(f"Fetching web for '{query}'…"):
-        client = GoogleSearch({"q": query, "api_key": SERPAPI_KEY})
-        results = client.get_dict().get("organic_results", [])[:top_k]
+        # Direct SerpApi HTTP call
+        r = requests.get(
+            "https://serpapi.com/search.json",
+            params={"q": query, "api_key": SERPAPI_KEY}
+        )
+        data = r.json()
+        results = data.get("organic_results", [])[:top_k]
         for r in results:
             url = r.get("link")
             if not url: continue
@@ -126,12 +127,10 @@ def chat_with_context(query: str) -> str:
         {"role": "system", "content": "You are a Zero1 strategy assistant."},
         {"role": "user",   "content": f"{query}\n\nContext:\n{ctx}"}
     ]
-    resp = client.chat.completions.create(
-        model="gpt-4", messages=messages, temperature=0.7
-    )
+    resp = client.chat.completions.create(model="gpt-4", messages=messages, temperature=0.7)
     return resp.choices[0].message.content
 
-# --- STREAMLIT UI ---
+# --- UI ---
 
 st.set_page_config(page_title="Zero1 RAG Assistant", layout="wide")
 st.title("🔮 Zero1 RAG Assistant")

@@ -1,4 +1,7 @@
 import os
+# Force ChromaDB to use DuckDB+Parquet backend to avoid SQLite version issues
+os.environ["CHROMA_DB_IMPL"] = "duckdb+parquet"
+
 import tempfile
 import requests
 import streamlit as st
@@ -13,17 +16,15 @@ from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 
 # --- Configuration via Streamlit secrets ---
-# Add these to Settings → Secrets:
+# In your Streamlit Cloud app settings, add under Settings → Secrets:
 # [openai]
-# api_key = "YOUR_OPENAI_KEY"
+# api_key = "YOUR_OPENAI_API_KEY"
 # [serpapi]
 # api_key = "YOUR_SERPAPI_KEY"
 # [gcp]
-# service_account = '''{...YOUR JSON...}'''
-# And set Environment Variable:
-# CHROMA_DB_IMPL = "duckdb+parquet"
+# service_account = '''{...YOUR_SERVICE_ACCOUNT_JSON...}'''
 
-# Load API keys and credentials
+# Load credentials
 openai.api_key = st.secrets.openai.api_key
 SERPAPI_KEY = st.secrets.serpapi.api_key
 
@@ -35,16 +36,16 @@ credentials = service_account.Credentials.from_service_account_info(
 
 drive_service = build('drive', 'v3', credentials=credentials)
 
-# Initialize vector store (uses env var or default duckdb+parquet)
-db_impl = os.getenv('CHROMA_DB_IMPL', 'duckdb+parquet')
+# Initialize ChromaDB client with DuckDB+Parquet
 chroma_client = chromadb.Client(Settings(
-    chroma_db_impl=db_impl,
+    chroma_db_impl="duckdb+parquet",
     persist_directory="./chroma_storage"
 ))
 embedding_fn = embedding_functions.OpenAIEmbeddingFunction(
     api_key=openai.api_key,
     model_name="text-embedding-ada-002"
 )
+# Create or get the "zero1" collection
 try:
     collection = chroma_client.get_collection(name="zero1")
 except Exception:
@@ -53,8 +54,7 @@ except Exception:
         embedding_function=embedding_fn
     )
 
-# --- Utility functions ---
-
+# Utility to extract text from Drive files
 def extract_text_from_drive_file(file_id, mime_type):
     if mime_type == 'application/pdf':
         resp = requests.get(
@@ -78,7 +78,7 @@ def extract_text_from_drive_file(file_id, mime_type):
             mimeType='text/plain'
         ).execute().decode('utf-8')
 
-
+# Index all Docs, Slides, and PDFs from Google Drive
 def index_drive_docs():
     with st.spinner("Indexing Google Drive documents..."):
         token = None
@@ -93,17 +93,13 @@ def index_drive_docs():
                 if not txt:
                     continue
                 emb = embedding_fn(txt)
-                collection.upsert([{
-                    'id': f['id'],
-                    'embedding': emb,
-                    'metadata': {'name': f['name'], 'source': 'drive'}
-                }])
+                collection.upsert([{ 'id': f['id'], 'embedding': emb, 'metadata': {'name': f['name'], 'source': 'drive'} }])
             token = res.get('nextPageToken')
             if not token:
                 break
         st.success("Drive indexing complete!")
 
-
+# Fetch and index top-k web results via SerpAPI
 def fetch_and_index_web(query, top_k=3):
     with st.spinner(f"Fetching web results for '{query}'..."):
         client = GoogleSearch({"q": query, "api_key": SERPAPI_KEY})
@@ -118,50 +114,46 @@ def fetch_and_index_web(query, top_k=3):
             if not text:
                 continue
             emb = embedding_fn(text)
-            collection.upsert([{
-                'id': url,
-                'embedding': emb,
-                'metadata': {'name': r.get('title', url), 'source': url}
-            }])
+            collection.upsert([{ 'id': url, 'embedding': emb, 'metadata': {'name': r.get('title', url), 'source': url} }])
         st.success("Web indexing complete!")
 
-
+# Retrieve top-k docs from the vector store
 def get_relevant_docs(query, top_k=5):
     res = collection.query(query_texts=[query], n_results=top_k)
     return res['documents'][0]
 
-
+# Chat with context
 def chat_with_context(query):
     docs = get_relevant_docs(query)
     ctx = "\n\n---\n\n".join(docs)
-    msgs = [
-        {"role": "system", "content": "You are a Zero1 strategist. Provide actionable recommendations."},
+    messages = [
+        {"role": "system", "content": "You are a Zero1 strategist. Provide actionable, data-driven recommendations."},
         {"role": "user", "content": f"{query}\n\nContext:\n{ctx}"}
     ]
-    resp = openai.ChatCompletion.create(model="gpt-4", messages=msgs, temperature=0.7)
+    resp = openai.ChatCompletion.create(model="gpt-4", messages=messages, temperature=0.7)
     return resp.choices[0].message.content
 
-# --- Streamlit UI ---
-st.set_page_config(page_title="Zero1 RAG Assistant", layout="wide")
-st.title("🔮 Zero1 RAG Assistant")
+# Streamlit UI
+st.set_page_config(page_title="Zero1 Strategy RAG Assistant", layout="wide")
+st.title("🔮 Zero1 Strategy RAG Assistant")
 
 with st.sidebar:
     st.header("Indexing")
     if st.button("Index Drive Docs"):
         index_drive_docs()
     st.write("---")
-    q = st.text_input("Fetch & index web:")
-    if st.button("Fetch Web") and q:
-        fetch_and_index_web(q)
+    web_q = st.text_input("Fetch & index web:")
+    if st.button("Fetch Web") and web_q:
+        fetch_and_index_web(web_q)
 
 st.write("---")
-usr = st.text_input("Ask a question about Zero1:")
-if st.button("Analyze") and usr:
+query = st.text_input("Ask a question about Zero1:")
+if st.button("Analyze") and query:
     with st.spinner("Analyzing..."):
-        ans = chat_with_context(usr)
+        answer = chat_with_context(query)
     st.markdown("**Response:**")
-    st.write(ans)
+    st.write(answer)
 
 st.write("---")
 st.subheader("📊 Cost & Growth Analysis")
-st.info("Use pandas on numeric outputs to model X crore capex and growth.")
+st.info("Use pandas on numeric outputs to model X crore capex and 100× growth.")

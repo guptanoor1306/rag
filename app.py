@@ -70,6 +70,7 @@ def extract_text_from_drive_file(file_id: str, mime: str) -> str:
             path = fh.name
         return "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
     else:
+        # Google Docs or Slides
         data = drive_service.files().export(fileId=file_id, mimeType="text/plain").execute()
         return data.decode("utf-8")
 
@@ -78,9 +79,15 @@ def index_drive_docs():
     st.write("🚀 **Starting Drive folder indexing...**")
     total = 0
     token = None
+    # Only Docs, Slides, PDFs
+    mime_filter = (
+        "mimeType='application/pdf' or "
+        "mimeType='application/vnd.google-apps.document' or "
+        "mimeType='application/vnd.google-apps.presentation'"
+    )
     while True:
         resp = drive_service.files().list(
-            q=f"'{SHARED_FOLDER}' in parents",
+            q=f"'{SHARED_FOLDER}' in parents and ({mime_filter})",
             fields="nextPageToken, files(id,name,mimeType)",
             pageToken=token,
             includeItemsFromAllDrives=True,
@@ -88,17 +95,18 @@ def index_drive_docs():
         ).execute()
 
         files = resp.get("files", [])
-        st.write(f"🔍 Found **{len(files)}** files in folder {SHARED_FOLDER}:")
+        st.write(f"🔍 Found **{len(files)}** Docs/Slides/PDFs in folder {SHARED_FOLDER}:")
         for f in files:
-            st.write(f" • **{f['name']}** (`{f['mimeType']}`)")
-            txt = extract_text_from_drive_file(f["id"], f["mimeType"])
+            name, mime = f['name'], f['mimeType']
+            st.write(f" • **{name}** (`{mime}`)")
+            txt = extract_text_from_drive_file(f['id'], mime)
             if not txt:
-                st.write(f"   ⚠️ No text extracted for {f['name']}")
-                continue
-            emb = get_embedding(txt)
-            index.upsert(vectors=[(f["id"], emb, {"name": f["name"], "source": "drive"})])
-            st.write(f"   ✅ Upserted vector for {f['name']}")
-            total += 1
+                st.write(f"   ⚠️ No text extracted for {name}")
+            else:
+                emb = get_embedding(txt)
+                index.upsert(vectors=[(f['id'], emb, {"name": name, "source": "drive"})])
+                st.write(f"   ✅ Upserted vector for {name}")
+                total += 1
 
         token = resp.get("nextPageToken")
         if not token:
@@ -153,6 +161,7 @@ def chat_with_context(query: str) -> str:
     return resp.choices[0].message.content
 
 # --- UI ---
+st.title("🔮 Zero1 RAG Assistant")
 with st.sidebar:
     st.header("Actions")
     if st.button("Index Drive Folder"):

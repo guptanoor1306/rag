@@ -89,14 +89,19 @@ def index_drive_docs():
     with st.spinner("Indexing Google Drive…"):
         token = None
         while True:
+            SHARED_FOLDER_ID = "⟨1eU8cfYvpHtNyiy9hcAF1JREoj59Fe6or?usp=sharing⟩"
+
             res = drive_service.files().list(
                 q=(
-                    "mimeType contains 'application/vnd.google-apps.document' or "
-                    "mimeType contains 'presentation' or mimeType='application/pdf'"
+                    f"'{SHARED_FOLDER_ID}' in parents and "
+                    "(mimeType contains 'application/vnd.google-apps.document' "
+                    "or mimeType contains 'presentation' "
+                    "or mimeType='application/pdf')"
                 ),
                 fields="nextPageToken, files(id, name, mimeType)",
                 pageToken=token
             ).execute()
+
             for f in res.get("files", []):
                 txt = extract_text_from_drive_file(f["id"], f["mimeType"])
                 if not txt:

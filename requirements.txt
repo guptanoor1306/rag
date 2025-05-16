@@ -5,6 +5,7 @@ PyDrive2>=1.11.1
 google-api-python-client>=2.93.0
 google-auth>=2.20.0
 chromadb>=0.4.3
+duckdb>=0.8.1  # required for DuckDB+Parquet storage
 beautifulsoup4>=4.12.2
 PyPDF2>=3.0.0
 requests>=2.31.0

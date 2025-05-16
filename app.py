@@ -9,6 +9,7 @@ from googleapiclient.discovery import build
 import chromadb
 from chromadb.utils import embedding_functions
 from bs4 import BeautifulSoup
+from PyPDF2 import PdfReader
 
 # --- Configuration via Streamlit secrets ---
 # In your Streamlit sharing settings, add secrets:
@@ -53,20 +54,22 @@ def extract_text_from_drive_file(file_id, mime_type):
     Export Google Docs/Slides to text or download PDFs.
     """
     if mime_type == 'application/pdf':
-        # Download PDF and extract text via PyPDF2
-        request = drive_service.files().get_media(fileId=file_id)
-        fh = tempfile.NamedTemporaryFile(delete=False)
-        downloader = requests.get(f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media",
-                                 headers={'Authorization': f'Bearer {credentials.token}'}, stream=True)
-        fh.write(downloader.content)
-        fh.close()
-        # PDF extraction
-        from PyPDF2 import PdfReader
+        # Download PDF and extract text via PdfReader
+        downloader = requests.get(
+            f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media",
+            headers={'Authorization': f'Bearer {credentials.token}'},
+            stream=True
+        )
+        with tempfile.NamedTemporaryFile(delete=False) as fh:
+            fh.write(downloader.content)
+            tmp_path = fh.name
         text = []
-        reader = PdfReader(fh.name)
+        reader = PdfReader(tmp_path)
         for page in reader.pages:
-            text.append(page.extract_text())
-        return '\n'.join(filter(None, text))
+            page_text = page.extract_text()
+            if page_text:
+                text.append(page_text)
+        return '\n'.join(text)
     else:
         # Docs or Slides: export to plain text
         request = drive_service.files().export(fileId=file_id,
@@ -95,17 +98,17 @@ def index_drive_docs():
                         'metadata': {'name': f['name'], 'source': 'drive'}
                     }
                 ])
-            page_token = resp.get('nextPageToken', None)
+            page_token = resp.get('nextPageToken')
             if not page_token:
                 break
         st.success("Drive indexing complete!")
 
 
-def fetch_and_index_web(query, top_k=5):
+def fetch_and_index_web(query, top_k=3):
     """Search web via SerpAPI, extract pages, compute embeddings, and index."""
     with st.spinner(f"Fetching and indexing web results for '{query}'..."):
-        search = GoogleSearch({"q": query, "api_key": SERPAPI_KEY})
-        results = search.get_dict().get('organic_results', [])[:top_k]
+        client = GoogleSearch({"q": query, "api_key": SERPAPI_KEY})
+        results = client.get_dict().get('organic_results', [])[:top_k]
         for r in results:
             url = r.get('link')
             if not url:
@@ -132,14 +135,11 @@ def get_relevant_docs(query, top_k=5):
         query_texts=[query],
         n_results=top_k
     )
-    docs = []
-    for rec in results['documents'][0]:
-        docs.append(rec)
-    return docs
+    return results['documents'][0]
 
 
 def chat_with_context(query):
-    docs = get_relevant_docs(query, top_k=5)
+    docs = get_relevant_docs(query)
     context = "\n\n---\n\n".join(docs)
     messages = [
         {"role": "system", "content": "You are a Zero1 strategy assistant. Provide actionable, data-driven recommendations."},
@@ -153,25 +153,27 @@ def chat_with_context(query):
     return resp.choices[0].message.content
 
 # --- Streamlit App UI ---
+st.set_page_config(page_title="Zero1 Strategy RAG Assistant", layout="wide")
 st.title("🔮 Zero1 Strategy RAG Assistant")
 
 with st.sidebar:
     st.header("🚀 Indexing")
-    if st.button("Index Google Drive"): index_drive_docs()
+    if st.button("Index Google Drive Docs"):
+        index_drive_docs()
     st.write("---")
-    q = st.text_input("Fetch & index web for query:")
-    if st.button("Fetch Web Context") and q:
-        fetch_and_index_web(q)
+    web_q = st.text_input("Fetch & index web for query:")
+    if st.button("Fetch Web Context") and web_q:
+        fetch_and_index_web(web_q)
 
 st.write("---")
 query = st.text_input("Ask your strategic question about Zero1:")
 if st.button("Analyze & Respond") and query:
-    with st.spinner("Thinking..."):
+    with st.spinner("Analyzing..."):
         answer = chat_with_context(query)
     st.markdown("**Response:**")
     st.write(answer)
 
-# Optional: embed a simple cost analysis stub
+# Cost & Growth Analysis Stub
 st.write("---")
-st.subheader("📊 Cost & Growth Analysis (stub)")
-st.info("Once you get numeric outputs from the assistant, compute your X crore capex and 100× growth model here using pandas.")
+st.subheader("📊 Cost & Growth Analysis")
+st.info("Parse numeric outputs from the assistant and use pandas to compute target capex & growth models.")
